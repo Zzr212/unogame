@@ -1,0 +1,5 @@
+{
+  "name": "3D UNO Multiplayer",
+  "description": "A fully functional 3D UNO card game with a simulated multiplayer lobby, 3D card animations, and game logic.",
+  "requestFramePermissions": []
+}
