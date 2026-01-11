@@ -16,7 +16,13 @@
     "@react-three/drei": "^10.7.7",
     "three": "^0.182.0",
     "zustand": "^5.0.9",
-    "socket.io-client": "4.7.4"
+    "socket.io-client": "4.7.4",
+    "path": "^0.12.7",
+    "express": "^5.2.1",
+    "http": "^0.0.1-security",
+    "socket.io": "^4.8.3",
+    "cors": "^2.8.5",
+    "url": "^0.11.4"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

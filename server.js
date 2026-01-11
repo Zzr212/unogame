@@ -1,21 +1,30 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const { v4: uuidv4 } = require('uuid');
-const cors = require('cors');
+import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import { v4 as uuidv4 } from 'uuid';
+import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// ES Module fix for __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
 
-const server = http.createServer(app);
+// Serve static files from the build directory (dist)
+app.use(express.static(path.join(__dirname, 'dist')));
+
+const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*", // Allow any origin for this demo
+    origin: "*", 
     methods: ["GET", "POST"]
   }
 });
 
-// --- GAME LOGIC UTILS (Inlined for standalone server) ---
+// --- GAME LOGIC UTILS ---
 const COLORS = ['red', 'blue', 'green', 'yellow'];
 
 const createDeck = () => {
@@ -52,7 +61,7 @@ const isValidMove = (card, topCard, activeColor) => {
 };
 
 // --- STATE MANAGEMENT ---
-const rooms = {}; // { roomId: { players, deck, discardPile, ... } }
+const rooms = {}; 
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
@@ -132,7 +141,7 @@ io.on('connection', (socket) => {
     if (!room || room.status !== 'PLAYING') return;
 
     const playerIndex = room.players.findIndex(p => p.id === socket.id);
-    if (playerIndex !== room.currentPlayerIndex) return; // Not your turn
+    if (playerIndex !== room.currentPlayerIndex) return;
 
     const player = room.players[playerIndex];
     const cardIndex = player.hand.findIndex(c => c.id === cardId);
@@ -143,12 +152,10 @@ io.on('connection', (socket) => {
 
     if (!isValidMove(card, topCard, room.currentColor)) return;
 
-    // Logic for playing card
     player.hand.splice(cardIndex, 1);
     player.cardCount = player.hand.length;
     room.discardPile.push(card);
 
-    // Check Win
     if (player.hand.length === 0) {
         room.status = 'GAME_OVER';
         room.winner = player;
@@ -156,13 +163,12 @@ io.on('connection', (socket) => {
         return;
     }
 
-    // Process Card Effects
     let nextIndex = (room.currentPlayerIndex + room.direction) % room.players.length;
     if (nextIndex < 0) nextIndex += room.players.length;
 
     let nextColor = card.color;
     if (card.color === 'black') {
-        nextColor = selectedColor || 'red'; // Should validate selectedColor
+        nextColor = selectedColor || 'red';
     }
 
     let skipTurn = false;
@@ -183,10 +189,7 @@ io.on('connection', (socket) => {
 
     room.currentColor = nextColor;
 
-    // Handle Draw Effects on Next Player
     if (cardsToDraw > 0) {
-        // Simple logic: Next player draws and loses turn
-        // Refill deck if needed
         for(let i=0; i<cardsToDraw; i++) {
              if (room.drawPile.length === 0) recycleDeck(room);
              if (room.drawPile.length > 0) {
@@ -196,7 +199,6 @@ io.on('connection', (socket) => {
                  io.to(nextPlayer.id).emit('hand_update', nextPlayer.hand);
              }
         }
-        // Skip next player
         nextIndex = (nextIndex + room.direction) % room.players.length;
         if (nextIndex < 0) nextIndex += room.players.length;
     } else if (skipTurn) {
@@ -206,7 +208,6 @@ io.on('connection', (socket) => {
 
     room.currentPlayerIndex = nextIndex;
     
-    // Broadcast
     io.to(roomId).emit('game_state_update', getPublicState(room));
     io.to(socket.id).emit('hand_update', player.hand);
   });
@@ -226,21 +227,8 @@ io.on('connection', (socket) => {
          
          io.to(socket.id).emit('hand_update', player.hand);
          
-         // Simple rule: pass turn after drawing (unless we add 'play immediately' logic)
-         // For now, let's keep turn to allow playing the drawn card if valid, 
-         // BUT standard UNO often passes turn or allows play.
-         // Let's AUTO PASS for simplicity in this server version if not playable?
-         // No, let user decide or simple pass for v1
-         
          let nextIndex = (room.currentPlayerIndex + room.direction) % room.players.length;
          if (nextIndex < 0) nextIndex += room.players.length;
-         
-         // Let's assume we pass turn for now to keep flow fast
-         // room.currentPlayerIndex = nextIndex; 
-         
-         // Actually, let's NOT pass turn, give user 1 chance (UI handles it)
-         // But to simplify the server loop, let's just emit state. User has to play or 'pass' (we need a pass action then).
-         // To make it identical to old logic: we just pass turn.
          room.currentPlayerIndex = nextIndex;
 
          io.to(roomId).emit('game_state_update', getPublicState(room));
@@ -248,7 +236,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    // Basic cleanup - remove player from rooms or mark as disconnected
     console.log('User disconnected', socket.id);
   });
 });
@@ -261,7 +248,6 @@ function recycleDeck(room) {
 }
 
 function getPublicState(room) {
-    // Return state without full hands of other players
     return {
         roomId: room.roomId,
         status: room.status,
@@ -270,11 +256,11 @@ function getPublicState(room) {
             name: p.name,
             cardCount: p.cardCount,
             isBot: p.isBot,
-            hand: [] // Hide opponents hands
+            hand: [] 
         })),
         currentPlayerIndex: room.currentPlayerIndex,
         direction: room.direction,
-        discardPile: [room.discardPile[room.discardPile.length-1]], // Only top card
+        discardPile: [room.discardPile[room.discardPile.length-1]], 
         drawPileCount: room.drawPile.length,
         currentColor: room.currentColor,
         winner: room.winner,
@@ -282,7 +268,13 @@ function getPublicState(room) {
     };
 }
 
-const PORT = 3001;
+// Handle React Routing, return all requests to React app
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
+// Render sets the PORT environment variable
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`SERVER RUNNING ON PORT ${PORT}`);
 });
