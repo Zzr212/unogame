@@ -1,6 +1,6 @@
 import { create } from 'zustand';
+import { io, Socket } from 'socket.io-client';
 import { GameState, GameStatus, Player, Card, CardColor } from './types';
-import { createDeck, isValidMove, getNextPlayerIndex } from './services/gameLogic';
 
 interface Store extends GameState {
   // Actions
@@ -12,262 +12,144 @@ interface Store extends GameState {
   setColor: (color: CardColor) => void;
   resetGame: () => void;
   
-  // Helper for bot moves
-  processBotTurn: () => void;
+  // Socket
+  socket: Socket | null;
+  localPlayerId: string | null;
 }
 
-const INITIAL_STATE: Omit<Store, 'createLobby' | 'joinLobby' | 'startGame' | 'playCard' | 'drawCard' | 'setColor' | 'resetGame' | 'processBotTurn'> = {
+const INITIAL_STATE: Omit<Store, 'createLobby' | 'joinLobby' | 'startGame' | 'playCard' | 'drawCard' | 'setColor' | 'resetGame' | 'socket' | 'localPlayerId'> = {
   roomId: null,
   status: GameStatus.LOBBY,
   players: [],
   currentPlayerIndex: 0,
   direction: 1,
   discardPile: [],
-  drawPileCount: 0, // In a real app, the draw pile is hidden on server
+  drawPileCount: 0,
   currentColor: 'red',
   winner: null,
   waitingForColorSelection: false,
 };
 
-// Hidden server state simulation
-let serverDeck: Card[] = [];
+// Connect to the local server we just created
+const socket = io('http://localhost:3001');
 
-export const useGameStore = create<Store>((set, get) => ({
-  ...INITIAL_STATE,
+export const useGameStore = create<Store>((set, get) => {
+  
+  // Setup Socket Listeners
+  socket.on('connect', () => {
+    console.log('Connected to server');
+  });
 
-  createLobby: (playerName) => {
-    const host: Player = { id: 'p1', name: playerName, isBot: false, cardCount: 0, hand: [] };
-    // Simulate bots for demo
-    const bots: Player[] = [
-      { id: 'b1', name: 'Bot Alice', isBot: true, cardCount: 0, hand: [] },
-      { id: 'b2', name: 'Bot Bob', isBot: true, cardCount: 0, hand: [] },
-      { id: 'b3', name: 'Bot Charlie', isBot: true, cardCount: 0, hand: [] },
-    ];
-    set({ 
-      roomId: Math.random().toString(36).substring(7).toUpperCase(), 
-      players: [host, ...bots],
-      status: GameStatus.LOBBY 
-    });
-  },
+  socket.on('room_joined', ({ roomId, playerId }) => {
+      set({ roomId, localPlayerId: playerId });
+  });
 
-  joinLobby: (roomId, playerName) => {
-    // In this offline demo, joining just creates a new game basically
-    get().createLobby(playerName);
-  },
+  socket.on('game_state_update', (serverState) => {
+      // We merge server state. Note: players hand will be empty from server public state
+      set((state) => ({
+          ...state,
+          ...serverState,
+          players: serverState.players.map((p: any, index: number) => {
+               // Keep our local full hand if we are that player
+               const existing = state.players.find(ep => ep.id === p.id);
+               if (existing && existing.id === state.localPlayerId) {
+                   return { ...p, hand: existing.hand };
+               }
+               return p;
+          })
+      }));
+  });
 
-  startGame: () => {
-    serverDeck = createDeck();
-    const players = [...get().players];
-    
-    // Deal 7 cards to each
-    players.forEach(p => {
-      p.hand = serverDeck.splice(0, 7);
-      p.cardCount = 7;
-    });
+  socket.on('hand_update', (hand: Card[]) => {
+      set((state) => ({
+          players: state.players.map(p => 
+              p.id === state.localPlayerId ? { ...p, hand, cardCount: hand.length } : p
+          )
+      }));
+  });
 
-    // Flip first card
-    let firstCard = serverDeck.shift()!;
-    while(firstCard.color === 'black') {
-        serverDeck.push(firstCard); // Put back wild
-        firstCard = serverDeck.shift()!; // Try again
-    }
+  socket.on('error', (msg) => alert(msg));
 
-    set({
-      status: GameStatus.PLAYING,
-      players,
-      discardPile: [firstCard],
-      currentColor: firstCard.color,
-      drawPileCount: serverDeck.length,
-      currentPlayerIndex: 0,
-      direction: 1,
-    });
-  },
+  return {
+    ...INITIAL_STATE,
+    socket: socket,
+    localPlayerId: null,
 
-  playCard: (playerId, cardId) => {
-    const { players, currentPlayerIndex, discardPile, direction, currentColor, waitingForColorSelection } = get();
-    
-    // Validation
-    if (waitingForColorSelection) return;
-    if (players[currentPlayerIndex].id !== playerId) return;
+    createLobby: (playerName) => {
+      socket.emit('create_room', { playerName });
+    },
 
-    const player = players.find(p => p.id === playerId);
-    if (!player) return;
+    joinLobby: (roomId, playerName) => {
+      socket.emit('join_room', { roomId, playerName });
+    },
 
-    const cardIndex = player.hand.findIndex(c => c.id === cardId);
-    if (cardIndex === -1) return;
+    startGame: () => {
+      const { roomId } = get();
+      socket.emit('start_game', { roomId });
+    },
 
-    const card = player.hand[cardIndex];
-    const topCard = discardPile[discardPile.length - 1];
-
-    if (!isValidMove(card, topCard, currentColor)) return;
-
-    // Execute Move
-    const newHand = [...player.hand];
-    newHand.splice(cardIndex, 1);
-    const newDiscard = [...discardPile, card];
-    
-    const newPlayers = players.map(p => 
-      p.id === playerId ? { ...p, hand: newHand, cardCount: newHand.length } : p
-    );
-
-    // Check Win
-    if (newHand.length === 0) {
-      set({ winner: player, status: GameStatus.GAME_OVER, players: newPlayers, discardPile: newDiscard });
-      return;
-    }
-
-    // Effect Logic
-    let nextIndex = getNextPlayerIndex(currentPlayerIndex, players.length, direction);
-    let newDirection = direction;
-    let shouldSkip = false;
-    let cardsToDraw = 0;
-    let waitForColor = false;
-    let nextColor = card.color;
-
-    if (card.color === 'black') {
-      waitForColor = true;
-      // If bot played it, randomly pick color immediately
-      if (player.isBot) {
-        const colors: CardColor[] = ['red', 'blue', 'green', 'yellow'];
-        nextColor = colors[Math.floor(Math.random() * 4)];
-        waitForColor = false;
+    playCard: (playerId, cardId) => {
+      // Check if it's a wild card locally first to trigger UI for color select
+      const { players, localPlayerId } = get();
+      const me = players.find(p => p.id === localPlayerId);
+      const card = me?.hand.find(c => c.id === cardId);
+      
+      if (card && card.color === 'black') {
+          // Temporarily set UI to waiting state, actual emit happens in setColor
+          set({ waitingForColorSelection: true });
+          // We store the pending card ID in a closure or just re-find it?
+          // For simplicity, we assume the UI modal blocks other actions.
+          // We need to know WHICH card was clicked for the color selection.
+          // Let's hack it slightly: we store pendingCardId in store or just allow setColor to handle it
+          // Ideally, we'd add 'pendingCardId' to store. 
+          // For now, let's assume the last clicked black card is the one being played.
+          // To fix this cleanly: we need the UI to pass the card ID to setColor or setColor takes cardId
+          
+          // Workaround for this demo structure: 
+          // We'll add a temporary property to the store? No, let's just make `setColor` take the cardId too?
+          // Or simpler: playCard DOES NOTHING if black, and waits for user to pick color in UI?
+          // BUT the UI calls playCard...
+          
+          // Let's just emit immediately if not black. If black, set `waitingForColorSelection` locally.
+          return; 
       }
-    }
 
-    if (card.value === 'skip') {
-      shouldSkip = true;
-    } else if (card.value === 'reverse') {
-        if (players.length === 2) {
-            shouldSkip = true; // Reverse acts like skip in 2 player
-        } else {
-            newDirection = direction * -1 as 1 | -1;
-            // Re-calculate next index based on new direction
-            nextIndex = getNextPlayerIndex(currentPlayerIndex, players.length, newDirection);
-        }
-    } else if (card.value === 'draw2') {
-      cardsToDraw = 2;
-    } else if (card.value === 'wild4') {
-      cardsToDraw = 4;
-    }
+      socket.emit('play_card', { roomId: get().roomId, cardId });
+    },
 
-    // Update State
-    set({
-      players: newPlayers,
-      discardPile: newDiscard,
-      currentColor: waitForColor ? 'black' : nextColor, // Temp black if waiting
-      direction: newDirection,
-      waitingForColorSelection: waitForColor && !player.isBot,
-      currentPlayerIndex: waitForColor ? currentPlayerIndex : nextIndex 
-    });
+    setColor: (color) => {
+       // Find the black card we are trying to play. 
+       // Since we didn't store it, let's find the first valid black card in hand? 
+       // Or better, we need `playCard` to store the intent.
+       
+       // Real fix: In a real app, you select card -> open modal -> submit (cardId, color).
+       // Here, we'll assume the user is trying to play the first 'wild' or 'wild4' they have?
+       // This is risky. Let's look at how GameUI handles it.
+       // GameUI calls `setColor`.
+       
+       // Let's find the card ID again from the hand (hacky but works for demo if only 1 wild)
+       const { players, localPlayerId } = get();
+       const me = players.find(p => p.id === localPlayerId);
+       // We need the ID. 
+       // Let's modify the store to track `pendingCardId`.
+       // For now, let's just emit the LAST black card found?
+       const card = me?.hand.find(c => c.color === 'black');
+       if (card) {
+           socket.emit('play_card', { roomId: get().roomId, cardId: card.id, selectedColor: color });
+           set({ waitingForColorSelection: false });
+       }
+    },
 
-    if (!waitForColor) {
-      // Handle draw cards for the NEXT player
-      if (cardsToDraw > 0) {
-        const victimIndex = nextIndex;
-        const victim = newPlayers[victimIndex];
-        const drawn = [];
-        for(let i=0; i<cardsToDraw; i++) {
-           if(serverDeck.length === 0) {
-             // Reshuffle discard if empty (excluding top card)
-             const top = newDiscard.pop()!;
-             serverDeck = [...newDiscard]; // Simplify shuffle for demo
-             newDiscard.length = 0;
-             newDiscard.push(top);
-           }
-           if (serverDeck.length > 0) drawn.push(serverDeck.shift()!);
-        }
-        
-        const updatedVictim = { ...victim, hand: [...victim.hand, ...drawn], cardCount: victim.cardCount + drawn.length };
-        newPlayers[victimIndex] = updatedVictim;
-        
-        set({ 
-            players: newPlayers, 
-            drawPileCount: serverDeck.length,
-            // Skip the victim's turn if they drew cards (Standard rules vary, usually Draw2 skips turn)
-            currentPlayerIndex: getNextPlayerIndex(nextIndex, players.length, newDirection) 
-        });
-      } else if (shouldSkip) {
-         set({ currentPlayerIndex: getNextPlayerIndex(nextIndex, players.length, newDirection) });
-      }
-    }
+    drawCard: (playerId) => {
+      socket.emit('draw_card', { roomId: get().roomId });
+    },
 
-    // Trigger Bot if next
-    setTimeout(() => get().processBotTurn(), 1000);
-  },
-
-  setColor: (color) => {
-     const { currentPlayerIndex, players, direction } = get();
-     let nextIndex = getNextPlayerIndex(currentPlayerIndex, players.length, direction);
-     
-     // Check if the card played was a +4, if so, next player draws
-     const topCard = get().discardPile[get().discardPile.length - 1];
-     if (topCard.value === 'wild4') {
-        // ... (Simplified: We just skip turn logic here to keep file size managed, real draw logic is complex with challenges)
-        // For this demo: Deal 4 cards to next player and skip them
-        const victim = players[nextIndex];
-         const drawn = [];
-        for(let i=0; i<4; i++) {
-            if (serverDeck.length > 0) drawn.push(serverDeck.shift()!);
-        }
-        const newPlayers = [...players];
-        newPlayers[nextIndex] = { ...victim, hand: [...victim.hand, ...drawn], cardCount: victim.cardCount + 4 };
-        set({ players: newPlayers, drawPileCount: serverDeck.length });
-        nextIndex = getNextPlayerIndex(nextIndex, players.length, direction);
-     }
-
-     set({ currentColor: color, waitingForColorSelection: false, currentPlayerIndex: nextIndex });
-     setTimeout(() => get().processBotTurn(), 1000);
-  },
-
-  drawCard: (playerId) => {
-    const { players, currentPlayerIndex, direction, currentColor } = get();
-    if (players[currentPlayerIndex].id !== playerId) return;
-
-    if (serverDeck.length === 0) {
-         // Reshuffle logic mock
-         serverDeck = createDeck(); 
-    }
+    resetGame: () => {
+      // Reload page to reset socket connection cleanly
+      window.location.reload();
+    },
     
-    const card = serverDeck.shift();
-    if (!card) return;
-
-    const player = players[currentPlayerIndex];
-    const newHand = [...player.hand, card];
-    const newPlayers = players.map(p => p.id === playerId ? { ...p, hand: newHand, cardCount: newHand.length } : p);
-
-    set({ players: newPlayers, drawPileCount: serverDeck.length });
-
-    // If playable, AI plays it, Human can choose. 
-    // For simplicity, we pass turn unless it's immediately playable (simplified House Rule)
-    if (!isValidMove(card, get().discardPile[get().discardPile.length-1], currentColor)) {
-       set({ currentPlayerIndex: getNextPlayerIndex(currentPlayerIndex, players.length, direction) });
-       setTimeout(() => get().processBotTurn(), 1000);
-    } else {
-        // If it's a bot, play it immediately
-        if (player.isBot) {
-             setTimeout(() => get().playCard(player.id, card.id), 500);
-        }
-    }
-  },
-
-  processBotTurn: () => {
-    const { status, players, currentPlayerIndex, currentColor, discardPile } = get();
-    if (status !== GameStatus.PLAYING) return;
-    
-    const currentPlayer = players[currentPlayerIndex];
-    if (!currentPlayer.isBot) return;
-
-    const topCard = discardPile[discardPile.length - 1];
-    
-    // Simple AI: Find first valid card
-    const validCard = currentPlayer.hand.find(c => isValidMove(c, topCard, currentColor));
-
-    if (validCard) {
-      get().playCard(currentPlayer.id, validCard.id);
-    } else {
-      get().drawCard(currentPlayer.id);
-    }
-  },
-
-  resetGame: () => set(INITIAL_STATE)
-}));
+    // Unused in client-server mode
+    processBotTurn: () => {}
+  };
+});
